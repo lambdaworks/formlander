@@ -54,6 +54,7 @@ RUN apk add --no-cache ca-certificates tzdata curl && \
   mkdir -p /app/storage /app/storage/logs
 
 COPY --from=builder /src/formlander /usr/local/bin/formlander
+COPY LICENSE /usr/share/licenses/formlander/LICENSE
 
 ENV FORMLANDER_ENV=production \
   FORMLANDER_PORT=8080 \
