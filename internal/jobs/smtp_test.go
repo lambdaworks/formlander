@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"formlander/internal/integrations"
 )
 
 // capturedMail records what a fake SMTP server received.
@@ -19,12 +21,13 @@ type capturedMail struct {
 	from         string
 	to           string
 	data         string
+	greeting     string
 	authReceived bool
 }
 
 // startFakeSMTPServer spins up a minimal plaintext SMTP server on a random
 // loopback port for one connection, capturing the envelope and message.
-func startFakeSMTPServer(t *testing.T) (host string, port int, captured *capturedMail) {
+func startFakeSMTPServer(t *testing.T, rejectLocalhost ...bool) (host string, port int, captured *capturedMail) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -67,6 +70,13 @@ func startFakeSMTPServer(t *testing.T) (host string, port int, captured *capture
 
 			switch {
 			case strings.HasPrefix(line, "EHLO"), strings.HasPrefix(line, "HELO"):
+				captured.mu.Lock()
+				captured.greeting = line
+				captured.mu.Unlock()
+				if len(rejectLocalhost) > 0 && rejectLocalhost[0] && strings.HasSuffix(line, " localhost") {
+					write("421 4.7.0 closing connection (EHLO)")
+					return
+				}
 				write("250-fake greets you")
 				write("250 AUTH PLAIN LOGIN")
 			case strings.HasPrefix(line, "AUTH"):
@@ -135,6 +145,47 @@ func TestSendSMTP(t *testing.T) {
 		defer captured.mu.Unlock()
 		assert.False(t, captured.authReceived, "expected no AUTH when username empty")
 		assert.Contains(t, captured.from, "a@x.com")
+	})
+
+	t.Run("uses the configured greeting with a relay that rejects localhost", func(t *testing.T) {
+		t.Setenv("FORMLANDER_SMTP_HELO_HOSTNAME", "formlander.example.com")
+		host, port, captured := startFakeSMTPServer(t, true)
+		profile := &integrations.MailerProfile{SMTPHost: host, SMTPPort: port, SMTPEncryption: "none"}
+		cfg := smtpConfigFromProfile(profile, "forms@example.com", "owner@example.com")
+
+		err := sendSMTP(cfg, buildSMTPMessage(message{From: cfg.From, To: cfg.To, Subject: "Test", Body: "Test"}))
+		require.NoError(t, err)
+		captured.mu.Lock()
+		defer captured.mu.Unlock()
+		assert.Equal(t, "EHLO formlander.example.com", captured.greeting)
+		assert.False(t, captured.authReceived)
+	})
+
+	t.Run("preserves the default greeting without configuration", func(t *testing.T) {
+		t.Setenv("FORMLANDER_SMTP_HELO_HOSTNAME", "")
+		host, port, captured := startFakeSMTPServer(t)
+		profile := &integrations.MailerProfile{SMTPHost: host, SMTPPort: port, SMTPEncryption: "none"}
+		cfg := smtpConfigFromProfile(profile, "forms@example.com", "owner@example.com")
+		require.NoError(t, sendSMTP(cfg, buildSMTPMessage(message{From: cfg.From, To: cfg.To, Body: "Test"})))
+		captured.mu.Lock()
+		defer captured.mu.Unlock()
+		assert.Equal(t, "EHLO localhost", captured.greeting)
+	})
+
+	t.Run("identifies a rejected greeting in the error", func(t *testing.T) {
+		host, port, _ := startFakeSMTPServer(t, true)
+		cfg := &smtpConfig{Host: host, Port: port, Encryption: "none", HeloHostname: "localhost"}
+		err := sendSMTP(cfg, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "SMTP EHLO/HELO:")
+	})
+
+	t.Run("rejects an invalid greeting before connecting", func(t *testing.T) {
+		cfg := &smtpConfig{Host: "invalid.example", Port: 587, HeloHostname: "example.com\r\nMAIL FROM:<a@example.com>"}
+		err := sendSMTP(cfg, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "SMTP HELO hostname:")
+		assert.NotContains(t, err.Error(), "MAIL FROM")
 	})
 
 	t.Run("gives up when the server never sends a greeting", func(t *testing.T) {

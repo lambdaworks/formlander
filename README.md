@@ -1,5 +1,7 @@
 # Formlander
 
+> LambdaWorks-maintained build based on upstream v3.2.3, with a configurable SMTP greeting for Google Workspace relay. See [PATCHES.md](PATCHES.md) for configuration, image publication and rollback instructions. The upstream documentation below describes the official image, not this patched build.
+
 [![GitHub stars](https://img.shields.io/github/stars/karloscodes/formlander?style=flat-square)](https://github.com/karloscodes/formlander/stargazers)
 [![License](https://img.shields.io/github/license/karloscodes/formlander?style=flat-square)](LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/karloscodes/formlander?style=flat-square)](https://hub.docker.com/r/karloscodes/formlander)

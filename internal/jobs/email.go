@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -191,13 +192,14 @@ func smtpConfigFromProfile(profile *integrations.MailerProfile, from, to string)
 		encryption = "starttls"
 	}
 	return &smtpConfig{
-		Host:       profile.SMTPHost,
-		Port:       profile.SMTPPort,
-		Username:   profile.SMTPUsername,
-		Password:   profile.SMTPPassword,
-		Encryption: encryption,
-		From:       from,
-		To:         to,
+		Host:         profile.SMTPHost,
+		Port:         profile.SMTPPort,
+		Username:     profile.SMTPUsername,
+		Password:     profile.SMTPPassword,
+		Encryption:   encryption,
+		HeloHostname: strings.TrimSpace(os.Getenv("FORMLANDER_SMTP_HELO_HOSTNAME")),
+		From:         from,
+		To:           to,
 	}
 }
 

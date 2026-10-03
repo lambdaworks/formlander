@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"crypto/tls"
+	"fmt"
 	"mime"
 	"net"
 	"net/mail"
@@ -16,13 +17,14 @@ var smtpTimeout = 30 * time.Second
 
 // smtpConfig holds the resolved settings for one SMTP send.
 type smtpConfig struct {
-	Host       string
-	Port       int
-	Username   string
-	Password   string
-	Encryption string // starttls | tls | none
-	From       string // header form, e.g. "Name <addr>"
-	To         string
+	Host         string
+	Port         int
+	Username     string
+	Password     string
+	Encryption   string // starttls | tls | none
+	HeloHostname string // empty preserves Go's default localhost greeting
+	From         string // header form, e.g. "Name <addr>"
+	To           string
 }
 
 // sendSMTP delivers a pre-built message via SMTP. TLS modes:
@@ -32,10 +34,42 @@ type smtpConfig struct {
 //
 // Certificates are always verified; credentials are never logged.
 func sendSMTP(cfg *smtpConfig, msg []byte) error {
-	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	if err := validateSMTPHeloHostname(cfg.HeloHostname); err != nil {
+		return err
+	}
+	conn, err := dialSMTP(cfg)
+	if err != nil {
+		return err
+	}
+	client, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("SMTP server greeting: %w", err)
+	}
+	defer client.Close()
 
-	// One deadline covers the whole session, so a server that stalls cannot
-	// block the jobs loop.
+	// Set the greeting before STARTTLS; Go reuses it after the TLS upgrade.
+	if cfg.HeloHostname != "" {
+		if err := client.Hello(cfg.HeloHostname); err != nil {
+			return fmt.Errorf("SMTP EHLO/HELO: %w", err)
+		}
+	}
+	if cfg.Encryption == "starttls" {
+		if err := client.StartTLS(tlsConfigFor(cfg.Host)); err != nil {
+			return fmt.Errorf("SMTP STARTTLS: %w", err)
+		}
+	}
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP AUTH: %w", err)
+		}
+	}
+	return deliverSMTP(client, cfg, msg)
+}
+
+func dialSMTP(cfg *smtpConfig) (net.Conn, error) {
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	dialer := &net.Dialer{Timeout: smtpTimeout}
 	var conn net.Conn
 	var err error
@@ -45,51 +79,58 @@ func sendSMTP(cfg *smtpConfig, msg []byte) error {
 		conn, err = dialer.Dial("tcp", addr)
 	}
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("SMTP connect: %w", err)
 	}
+	// One deadline covers the whole session, from greeting through QUIT.
 	if err := conn.SetDeadline(time.Now().Add(smtpTimeout)); err != nil {
 		conn.Close()
-		return err
+		return nil, fmt.Errorf("SMTP deadline: %w", err)
 	}
+	return conn, nil
+}
 
-	client, err := smtp.NewClient(conn, cfg.Host)
-	if err != nil {
-		conn.Close()
-		return err
-	}
-	defer client.Close()
-
-	if cfg.Encryption == "starttls" {
-		if err := client.StartTLS(tlsConfigFor(cfg.Host)); err != nil {
-			return err
-		}
-	}
-
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := client.Auth(auth); err != nil {
-			return err
-		}
-	}
-
+func deliverSMTP(client *smtp.Client, cfg *smtpConfig, msg []byte) error {
 	if err := client.Mail(envelopeAddr(cfg.From)); err != nil {
-		return err
+		return fmt.Errorf("SMTP MAIL FROM: %w", err)
 	}
 	if err := client.Rcpt(envelopeAddr(cfg.To)); err != nil {
-		return err
+		return fmt.Errorf("SMTP RCPT TO: %w", err)
 	}
-
 	w, err := client.Data()
 	if err != nil {
-		return err
+		return fmt.Errorf("SMTP DATA: %w", err)
 	}
 	if _, err := w.Write(msg); err != nil {
-		return err
+		return fmt.Errorf("SMTP message write: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return fmt.Errorf("SMTP message acceptance: %w", err)
 	}
-	return client.Quit()
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("SMTP QUIT after message acceptance: %w", err)
+	}
+	return nil
+}
+
+func validateSMTPHeloHostname(hostname string) error {
+	if hostname == "" {
+		return nil
+	}
+	if len(hostname) > 253 {
+		return fmt.Errorf("SMTP HELO hostname: exceeds 253 characters")
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("SMTP HELO hostname: invalid DNS label")
+		}
+		for _, ch := range label {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+				(ch >= '0' && ch <= '9') || ch == '-') {
+				return fmt.Errorf("SMTP HELO hostname: invalid DNS character")
+			}
+		}
+	}
+	return nil
 }
 
 func tlsConfigFor(host string) *tls.Config {
